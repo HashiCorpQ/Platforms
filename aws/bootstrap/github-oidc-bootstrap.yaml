@@ -1,0 +1,221 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  HashiCorpQ platforms | GitHub OIDC bootstrap v1.0
+  Deployed as a StackSet from the Management account. Creates a per-customer
+  GitHub Actions deployment role in the target account, and optionally the
+  GitHub OIDC identity provider (set CreateOidcProvider=true ONLY for accounts
+  that have never had one - it is a one-per-account singleton).
+  Partition-agnostic: all ARNs use AWS::Partition for GovCloud portability.
+
+Parameters:
+  GitHubOrg:
+    Description: GitHub organization name.
+    Type: String
+    Default: HashiCorpQ
+  GitHubRepo:
+    Description: Customer repository name (repo is the customer; programs are directories).
+    Type: String
+    Default: webIQ
+  GitHubEnvironment:
+    Description: GitHub environment name gating deploys (convention <customer>-<env>).
+    Type: String
+    Default: webiq-dev
+  CustomerPrefix:
+    Description: >-
+      Prefix scoping all IAM permissions. Customer stacks must be named
+      <CustomerPrefix>-* (e.g. webiq -> webiq-core-networking).
+    Type: String
+    Default: webiq
+    AllowedPattern: ^[a-z][a-z0-9-]{2,20}$
+  EnvironmentName:
+    Description: Short environment name used in the role name.
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+  CreateOidcProvider:
+    Description: >-
+      Create the GitHub OIDC provider in this account. Singleton - set true only
+      if 'aws iam list-open-id-connect-providers' shows no
+      token.actions.githubusercontent.com entry in the target account.
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+
+Conditions:
+  ShouldCreateProvider: !Equals [!Ref CreateOidcProvider, 'true']
+
+Resources:
+
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  DeploymentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'gha-deploy-${CustomerPrefix}-${EnvironmentName}'
+      Description: !Sub 'GitHub Actions OIDC deployment role for ${GitHubOrg}/${GitHubRepo} (${GitHubEnvironment})'
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: GitHubActionsOIDC
+            Effect: Allow
+            Principal:
+              Federated: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main'
+                  - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:pull_request'
+                  - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:environment:${GitHubEnvironment}'
+      Policies:
+        - PolicyName: !Sub '${CustomerPrefix}-cfn-deploy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudFormationStackOps
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:GetTemplate
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:ListChangeSets
+                  - cloudformation:DetectStackDrift
+                  - cloudformation:DescribeStackDriftDetectionStatus
+                  - cloudformation:DescribeStackResourceDrifts
+                  - cloudformation:TagResource
+                  - cloudformation:UntagResource
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/${CustomerPrefix}-*'
+              - Sid: CloudFormationAccountLevelReads
+                Effect: Allow
+                Action:
+                  - cloudformation:ValidateTemplate
+                  - cloudformation:ListExports
+                  - cloudformation:ListImports
+                  - logs:DescribeLogGroups
+                Resource: '*'
+              - Sid: EC2NetworkingOps
+                Effect: Allow
+                Action:
+                  - ec2:CreateVpc
+                  - ec2:DeleteVpc
+                  - ec2:ModifyVpcAttribute
+                  - ec2:DescribeVpcs
+                  - ec2:CreateSubnet
+                  - ec2:DeleteSubnet
+                  - ec2:ModifySubnetAttribute
+                  - ec2:DescribeSubnets
+                  - ec2:CreateInternetGateway
+                  - ec2:DeleteInternetGateway
+                  - ec2:AttachInternetGateway
+                  - ec2:DetachInternetGateway
+                  - ec2:DescribeInternetGateways
+                  - ec2:CreateRouteTable
+                  - ec2:DeleteRouteTable
+                  - ec2:DescribeRouteTables
+                  - ec2:CreateRoute
+                  - ec2:DeleteRoute
+                  - ec2:ReplaceRoute
+                  - ec2:AssociateRouteTable
+                  - ec2:DisassociateRouteTable
+                  - ec2:CreateNetworkAcl
+                  - ec2:DeleteNetworkAcl
+                  - ec2:DescribeNetworkAcls
+                  - ec2:CreateNetworkAclEntry
+                  - ec2:DeleteNetworkAclEntry
+                  - ec2:ReplaceNetworkAclEntry
+                  - ec2:ReplaceNetworkAclAssociation
+                  - ec2:CreateSecurityGroup
+                  - ec2:DeleteSecurityGroup
+                  - ec2:DescribeSecurityGroups
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:RevokeSecurityGroupIngress
+                  - ec2:AuthorizeSecurityGroupEgress
+                  - ec2:RevokeSecurityGroupEgress
+                  - ec2:UpdateSecurityGroupRuleDescriptionsIngress
+                  - ec2:UpdateSecurityGroupRuleDescriptionsEgress
+                  - ec2:CreateVpcEndpoint
+                  - ec2:DeleteVpcEndpoints
+                  - ec2:ModifyVpcEndpoint
+                  - ec2:DescribeVpcEndpoints
+                  - ec2:CreateFlowLogs
+                  - ec2:DeleteFlowLogs
+                  - ec2:DescribeFlowLogs
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                  - ec2:DescribeTags
+                  - ec2:DescribeAvailabilityZones
+                  - ec2:DescribeAccountAttributes
+                Resource: '*'
+              - Sid: IAMRoleOpsScopedToCustomer
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:ListAttachedRolePolicies
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:PassRole
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${CustomerPrefix}-*'
+              - Sid: IAMInstanceProfileOps
+                Effect: Allow
+                Action:
+                  - iam:CreateInstanceProfile
+                  - iam:DeleteInstanceProfile
+                  - iam:GetInstanceProfile
+                  - iam:AddRoleToInstanceProfile
+                  - iam:RemoveRoleFromInstanceProfile
+                  - iam:TagInstanceProfile
+                  - iam:UntagInstanceProfile
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/${CustomerPrefix}-*'
+              - Sid: CloudWatchLogsOps
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:PutRetentionPolicy
+                  - logs:DeleteRetentionPolicy
+                  - logs:TagResource
+                  - logs:UntagResource
+                  - logs:ListTagsForResource
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/vpc/${CustomerPrefix}-*'
+      Tags:
+        - {Key: Customer, Value: !Ref CustomerPrefix}
+        - {Key: Environment, Value: !Ref EnvironmentName}
+        - {Key: ManagedBy, Value: hashicorpq-platforms-bootstrap}
+
+Outputs:
+  DeploymentRoleArn:
+    Description: Role ARN for the customer repo workflow DEPLOY_ROLE_ARN.
+    Value: !GetAtt DeploymentRole.Arn

@@ -1,0 +1,726 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  HashiCorpQ platforms | networking module v1.0
+  3-AZ VPC with web/app/db/reserved tiers, AI training/inference subnets,
+  stateless-correct NACLs, S3 Gateway Endpoint, and VPC Flow Logs.
+  Pure networking domain: compute, IAM instance roles, and budgets live in
+  their own modules. All subnets derived from VpcCidr via Fn::Cidr.
+
+Parameters:
+  NamePrefix:
+    Description: >-
+      Customer-program prefix driving all resource names and export namespaces
+      (e.g. webiq-core, gdit-sewp). Lowercase letters, digits, hyphens.
+    Type: String
+    Default: webiq-core
+    AllowedPattern: ^[a-z][a-z0-9-]{2,30}$
+    ConstraintDescription: 3-31 chars, lowercase alphanumeric and hyphens, starts with a letter
+  VpcCidr:
+    Description: VPC CIDR block. Must be a /16; sixteen /20 subnets are derived from it.
+    Type: String
+    Default: 10.16.0.0/16
+    AllowedPattern: ^(\d{1,3}\.){3}\d{1,3}/16$
+    ConstraintDescription: Must be an IPv4 /16 CIDR (e.g. 10.16.0.0/16)
+  AllowedSshCidr:
+    Description: Trusted CIDR range for SSH ingress.
+    Type: String
+    Default: 203.0.113.0/24
+    AllowedPattern: ^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$
+    ConstraintDescription: Must be a valid IPv4 CIDR
+  Environment:
+    Description: Environment tag (dev, test, prod).
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+  CostCenter:
+    Description: Cost center tag for chargeback/showback.
+    Type: String
+    Default: Platform
+  DataClassification:
+    Description: Data classification tag.
+    Type: String
+    Default: Confidential
+  ComplianceProfile:
+    Description: Compliance baseline this deployment must satisfy.
+    Type: String
+    Default: commercial
+    AllowedValues: [commercial, government]
+  AIWorkloadType:
+    Description: Primary AI/ML workload pattern for the AI subnets.
+    Type: String
+    Default: GenAI
+    AllowedValues: [GenAI, Training, Inference, Hybrid]
+  FlowLogRetentionDays:
+    Description: CloudWatch retention for VPC flow logs. Government profiles typically require 90+.
+    Type: Number
+    Default: 30
+    AllowedValues: [30, 60, 90, 180, 365]
+
+Resources:
+
+  # ----------------------------------------------------------------- VPC core
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-vpc'}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+        - {Key: ComplianceProfile, Value: !Ref ComplianceProfile}
+        - {Key: AIWorkloadType, Value: !Ref AIWorkloadType}
+        - {Key: ManagedBy, Value: hashicorpq-platforms}
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-igw'}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # ------------------------------------------------------------- Route tables
+  RouteTableWeb:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-rtb-web'}
+        - {Key: Environment, Value: !Ref Environment}
+
+  RouteTableWebDefaultIPv4:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTableWeb
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-rtb-private'}
+        - {Key: Environment, Value: !Ref Environment}
+
+  # ------------------------------------------------------------------ Subnets
+  # Sixteen /20s derived from the /16 via Fn::Cidr. Index map:
+  #   0/4/8  reserved a/b/c    1/5/9  db a/b/c    2/6/10 app a/b/c
+  #   3/7/11 web a/b/c         12/13  ai-training a/b   14/15 ai-inference a/b
+  SubnetReservedA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Select [0, !Cidr [!GetAtt VPC.CidrBlock, 16, 12]]
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-reserved-a'}
+        - {Key: Tier, Value: reserved}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+  SubnetReservedB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Select [4, !Cidr [!GetAtt VPC.CidrBlock, 16, 12]]
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-reserved-b'}
+        - {Key: Tier, Value: reserved}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+  SubnetReservedC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [2, !GetAZs '']
+      CidrBlock: !Select [8, !Cidr [!GetAtt VPC.CidrBlock, 16, 12]]
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-reserved-c'}
+        - {Key: Tier, Value: reserved}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+  SubnetDBA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Select [1, !Cidr [!GetAtt VPC.CidrBlock, 16, 12]]
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-db-a'}
+        - {Key: Tier, Value: db}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+  SubnetDBB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Select [5, !Cidr [!GetAtt VPC.CidrBlock, 16, 12]]
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-db-b'}
+        - {Key: Tier, Value: db}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+  SubnetDBC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [2, !GetAZs '']
+      CidrBlock: !Select [9, !Cidr [!GetAtt VPC.CidrBlock, 16, 12]]
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-db-c'}
+        - {Key: Tier, Value: db}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+  SubnetAPPA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Select [2, !Cidr [!GetAtt VPC.CidrBlock, 16, 12]]
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-app-a'}
+        - {Key: Tier, Value: app}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+  SubnetAPPB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Select [6, !Cidr [!GetAtt VPC.CidrBlock, 16, 12]]
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-app-b'}
+        - {Key: Tier, Value: app}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+  SubnetAPPC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [2, !GetAZs '']
+      CidrBlock: !Select [10, !Cidr [!GetAtt VPC.CidrBlock, 16, 12]]
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-app-c'}
+        - {Key: Tier, Value: app}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+  SubnetWEBA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Select [3, !Cidr [!GetAtt VPC.CidrBlock, 16, 12]]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-web-a'}
+        - {Key: Tier, Value: web}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+  SubnetWEBB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Select [7, !Cidr [!GetAtt VPC.CidrBlock, 16, 12]]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-web-b'}
+        - {Key: Tier, Value: web}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+  SubnetWEBC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [2, !GetAZs '']
+      CidrBlock: !Select [11, !Cidr [!GetAtt VPC.CidrBlock, 16, 12]]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-web-c'}
+        - {Key: Tier, Value: web}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+  SubnetAITrainingA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Select [12, !Cidr [!GetAtt VPC.CidrBlock, 16, 12]]
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-ai-training-a'}
+        - {Key: Tier, Value: ai-training}
+        - {Key: WorkloadType, Value: AI-Training}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+  SubnetAITrainingB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Select [13, !Cidr [!GetAtt VPC.CidrBlock, 16, 12]]
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-ai-training-b'}
+        - {Key: Tier, Value: ai-training}
+        - {Key: WorkloadType, Value: AI-Training}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+  SubnetAIInferenceA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Select [14, !Cidr [!GetAtt VPC.CidrBlock, 16, 12]]
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-ai-inference-a'}
+        - {Key: Tier, Value: ai-inference}
+        - {Key: WorkloadType, Value: AI-Inference}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+  SubnetAIInferenceB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Select [15, !Cidr [!GetAtt VPC.CidrBlock, 16, 12]]
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-ai-inference-b'}
+        - {Key: Tier, Value: ai-inference}
+        - {Key: WorkloadType, Value: AI-Inference}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+
+  # -------------------------------------------- Route table associations
+  RtaWebA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref SubnetWEBA, RouteTableId: !Ref RouteTableWeb}
+  RtaWebB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref SubnetWEBB, RouteTableId: !Ref RouteTableWeb}
+  RtaWebC:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref SubnetWEBC, RouteTableId: !Ref RouteTableWeb}
+  RtaAppA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref SubnetAPPA, RouteTableId: !Ref PrivateRouteTable}
+  RtaAppB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref SubnetAPPB, RouteTableId: !Ref PrivateRouteTable}
+  RtaAppC:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref SubnetAPPC, RouteTableId: !Ref PrivateRouteTable}
+  RtaDbA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref SubnetDBA, RouteTableId: !Ref PrivateRouteTable}
+  RtaDbB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref SubnetDBB, RouteTableId: !Ref PrivateRouteTable}
+  RtaDbC:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref SubnetDBC, RouteTableId: !Ref PrivateRouteTable}
+  RtaAiTrainA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref SubnetAITrainingA, RouteTableId: !Ref PrivateRouteTable}
+  RtaAiTrainB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref SubnetAITrainingB, RouteTableId: !Ref PrivateRouteTable}
+  RtaAiInfA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref SubnetAIInferenceA, RouteTableId: !Ref PrivateRouteTable}
+  RtaAiInfB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref SubnetAIInferenceB, RouteTableId: !Ref PrivateRouteTable}
+
+  # -------------------------------------------------------------------- NACLs
+  PublicSubnetNACL:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-nacl-public'}
+        - {Key: Environment, Value: !Ref Environment}
+
+  PrivateSubnetNACL:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-nacl-private'}
+        - {Key: Environment, Value: !Ref Environment}
+
+  # Public NACL - inbound
+  PubNaclInHTTP:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetNACL
+      RuleNumber: 100
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: 0.0.0.0/0
+      PortRange: {From: 80, To: 80}
+  PubNaclInHTTPS:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetNACL
+      RuleNumber: 110
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: 0.0.0.0/0
+      PortRange: {From: 443, To: 443}
+  PubNaclInSSH:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetNACL
+      RuleNumber: 120
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: !Ref AllowedSshCidr
+      PortRange: {From: 22, To: 22}
+  PubNaclInEphemeral:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetNACL
+      RuleNumber: 130
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: 0.0.0.0/0
+      PortRange: {From: 1024, To: 65535}
+
+  # Public NACL - outbound. NACLs are stateless: return traffic for inbound
+  # 80/443/22 leaves on the client's ephemeral port. (Runbook error #2)
+  PubNaclOutHTTP:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetNACL
+      RuleNumber: 100
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: 0.0.0.0/0
+      PortRange: {From: 80, To: 80}
+  PubNaclOutHTTPS:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetNACL
+      RuleNumber: 110
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: 0.0.0.0/0
+      PortRange: {From: 443, To: 443}
+  PubNaclOutEphemeral:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetNACL
+      RuleNumber: 120
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: 0.0.0.0/0
+      PortRange: {From: 1024, To: 65535}
+  PubNaclOutDNS:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicSubnetNACL
+      RuleNumber: 130
+      Protocol: 17
+      RuleAction: allow
+      Egress: true
+      CidrBlock: 0.0.0.0/0
+      PortRange: {From: 53, To: 53}
+
+  # Private NACL - inbound. Ephemeral open beyond VPC CIDR because S3 Gateway
+  # Endpoint responses arrive from S3 public IP ranges. (Runbook error #3)
+  PrivNaclInVpc:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateSubnetNACL
+      RuleNumber: 100
+      Protocol: -1
+      RuleAction: allow
+      Egress: false
+      CidrBlock: !GetAtt VPC.CidrBlock
+  PrivNaclInEphemeral:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateSubnetNACL
+      RuleNumber: 110
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: 0.0.0.0/0
+      PortRange: {From: 1024, To: 65535}
+
+  # Private NACL - outbound
+  PrivNaclOutAll:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateSubnetNACL
+      RuleNumber: 100
+      Protocol: -1
+      RuleAction: allow
+      Egress: true
+      CidrBlock: 0.0.0.0/0
+
+  # NACL associations
+  NaclAssocWebA:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties: {SubnetId: !Ref SubnetWEBA, NetworkAclId: !Ref PublicSubnetNACL}
+  NaclAssocWebB:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties: {SubnetId: !Ref SubnetWEBB, NetworkAclId: !Ref PublicSubnetNACL}
+  NaclAssocWebC:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties: {SubnetId: !Ref SubnetWEBC, NetworkAclId: !Ref PublicSubnetNACL}
+  NaclAssocAppA:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties: {SubnetId: !Ref SubnetAPPA, NetworkAclId: !Ref PrivateSubnetNACL}
+  NaclAssocAppB:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties: {SubnetId: !Ref SubnetAPPB, NetworkAclId: !Ref PrivateSubnetNACL}
+  NaclAssocAppC:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties: {SubnetId: !Ref SubnetAPPC, NetworkAclId: !Ref PrivateSubnetNACL}
+  NaclAssocDbA:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties: {SubnetId: !Ref SubnetDBA, NetworkAclId: !Ref PrivateSubnetNACL}
+  NaclAssocDbB:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties: {SubnetId: !Ref SubnetDBB, NetworkAclId: !Ref PrivateSubnetNACL}
+  NaclAssocDbC:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties: {SubnetId: !Ref SubnetDBC, NetworkAclId: !Ref PrivateSubnetNACL}
+  NaclAssocAiTrainA:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties: {SubnetId: !Ref SubnetAITrainingA, NetworkAclId: !Ref PrivateSubnetNACL}
+  NaclAssocAiTrainB:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties: {SubnetId: !Ref SubnetAITrainingB, NetworkAclId: !Ref PrivateSubnetNACL}
+  NaclAssocAiInfA:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties: {SubnetId: !Ref SubnetAIInferenceA, NetworkAclId: !Ref PrivateSubnetNACL}
+  NaclAssocAiInfB:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties: {SubnetId: !Ref SubnetAIInferenceB, NetworkAclId: !Ref PrivateSubnetNACL}
+
+  # ---------------------------------------------------------------- Endpoints
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref RouteTableWeb
+        - !Ref PrivateRouteTable
+
+  # ---------------------------------------------------------------- Flow logs
+  VPCFlowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/vpc/${NamePrefix}/flowlogs'
+      RetentionInDays: !Ref FlowLogRetentionDays
+
+  VPCFlowLogRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: vpc-flow-logs.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: flowlogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource:
+                  - !GetAtt VPCFlowLogGroup.Arn
+                  - !Sub '${VPCFlowLogGroup.Arn}:*'
+
+  VPCFlowLog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      ResourceType: VPC
+      ResourceId: !Ref VPC
+      TrafficType: ALL
+      LogDestinationType: cloud-watch-logs
+      LogGroupName: !Ref VPCFlowLogGroup
+      DeliverLogsPermissionArn: !GetAtt VPCFlowLogRole.Arn
+
+  # ----------------------------------------------------------- Security groups
+  BastionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Restricted admin ingress (SSH from trusted CIDR, HTTPS)
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-sg-bastion'}
+        - {Key: Environment, Value: !Ref Environment}
+      SecurityGroupIngress:
+        - {Description: SSH from trusted CIDR, IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref AllowedSshCidr}
+        - {Description: HTTPS in, IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0}
+      SecurityGroupEgress:
+        - {Description: HTTPS out, IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0}
+        - {Description: HTTP out for packages, IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0}
+        - {Description: DNS out, IpProtocol: udp, FromPort: 53, ToPort: 53, CidrIp: 0.0.0.0/0}
+
+  WebTierSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Public web/application tier (WAF-ready)
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-sg-web'}
+        - {Key: Environment, Value: !Ref Environment}
+      SecurityGroupIngress:
+        - {Description: HTTP from internet, IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0}
+        - {Description: HTTPS from internet, IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0}
+      SecurityGroupEgress:
+        - {Description: HTTPS out, IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0}
+        - {Description: HTTP out, IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0}
+
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Private database tier, access from web tier only
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-sg-db'}
+        - {Key: Environment, Value: !Ref Environment}
+      SecurityGroupIngress:
+        - {Description: MySQL/Aurora from web tier, IpProtocol: tcp, FromPort: 3306, ToPort: 3306, SourceSecurityGroupId: !Ref WebTierSecurityGroup}
+      SecurityGroupEgress:
+        - {Description: HTTPS out, IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0}
+
+  AIWorkloadSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Private AI/ML workload access
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-sg-ai'}
+        - {Key: WorkloadType, Value: !Ref AIWorkloadType}
+        - {Key: Environment, Value: !Ref Environment}
+      SecurityGroupIngress:
+        - {Description: SSH from trusted admin range, IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref AllowedSshCidr}
+        - {Description: Inference traffic from web tier, IpProtocol: tcp, FromPort: 8000, ToPort: 8000, SourceSecurityGroupId: !Ref WebTierSecurityGroup}
+      SecurityGroupEgress:
+        - {Description: HTTPS out for models and APIs, IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0}
+        - {Description: HTTP out for packages, IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0}
+
+Outputs:
+  VpcId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export: {Name: !Sub '${NamePrefix}-vpc'}
+  VpcCidrOut:
+    Description: VPC CIDR block
+    Value: !GetAtt VPC.CidrBlock
+    Export: {Name: !Sub '${NamePrefix}-vpc-cidr'}
+  RouteTableWebId:
+    Description: Public (web) route table
+    Value: !Ref RouteTableWeb
+    Export: {Name: !Sub '${NamePrefix}-rtb-web'}
+  RouteTablePrivateId:
+    Description: Private route table (TGW attachment target)
+    Value: !Ref PrivateRouteTable
+    Export: {Name: !Sub '${NamePrefix}-rtb-private'}
+  SubnetWebA:
+    Value: !Ref SubnetWEBA
+    Export: {Name: !Sub '${NamePrefix}-subnet-web-a'}
+  SubnetWebB:
+    Value: !Ref SubnetWEBB
+    Export: {Name: !Sub '${NamePrefix}-subnet-web-b'}
+  SubnetWebC:
+    Value: !Ref SubnetWEBC
+    Export: {Name: !Sub '${NamePrefix}-subnet-web-c'}
+  SubnetAppA:
+    Value: !Ref SubnetAPPA
+    Export: {Name: !Sub '${NamePrefix}-subnet-app-a'}
+  SubnetAppB:
+    Value: !Ref SubnetAPPB
+    Export: {Name: !Sub '${NamePrefix}-subnet-app-b'}
+  SubnetAppC:
+    Value: !Ref SubnetAPPC
+    Export: {Name: !Sub '${NamePrefix}-subnet-app-c'}
+  SubnetDbA:
+    Value: !Ref SubnetDBA
+    Export: {Name: !Sub '${NamePrefix}-subnet-db-a'}
+  SubnetDbB:
+    Value: !Ref SubnetDBB
+    Export: {Name: !Sub '${NamePrefix}-subnet-db-b'}
+  SubnetDbC:
+    Value: !Ref SubnetDBC
+    Export: {Name: !Sub '${NamePrefix}-subnet-db-c'}
+  SubnetReservedAOut:
+    Value: !Ref SubnetReservedA
+    Export: {Name: !Sub '${NamePrefix}-subnet-reserved-a'}
+  SubnetReservedBOut:
+    Value: !Ref SubnetReservedB
+    Export: {Name: !Sub '${NamePrefix}-subnet-reserved-b'}
+  SubnetReservedCOut:
+    Value: !Ref SubnetReservedC
+    Export: {Name: !Sub '${NamePrefix}-subnet-reserved-c'}
+  SubnetAiTrainingA:
+    Value: !Ref SubnetAITrainingA
+    Export: {Name: !Sub '${NamePrefix}-subnet-ai-training-a'}
+  SubnetAiTrainingB:
+    Value: !Ref SubnetAITrainingB
+    Export: {Name: !Sub '${NamePrefix}-subnet-ai-training-b'}
+  SubnetAiInferenceA:
+    Value: !Ref SubnetAIInferenceA
+    Export: {Name: !Sub '${NamePrefix}-subnet-ai-inference-a'}
+  SubnetAiInferenceB:
+    Value: !Ref SubnetAIInferenceB
+    Export: {Name: !Sub '${NamePrefix}-subnet-ai-inference-b'}
+  SgBastion:
+    Value: !Ref BastionSecurityGroup
+    Export: {Name: !Sub '${NamePrefix}-sg-bastion'}
+  SgWeb:
+    Value: !Ref WebTierSecurityGroup
+    Export: {Name: !Sub '${NamePrefix}-sg-web'}
+  SgDb:
+    Value: !Ref DatabaseSecurityGroup
+    Export: {Name: !Sub '${NamePrefix}-sg-db'}
+  SgAi:
+    Value: !Ref AIWorkloadSecurityGroup
+    Export: {Name: !Sub '${NamePrefix}-sg-ai'}

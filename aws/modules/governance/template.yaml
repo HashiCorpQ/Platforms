@@ -37,6 +37,17 @@ Parameters:
     Type: String
     Default: aws.administrator+FinOps@angsignal.com
     AllowedPattern: ^[^\s@]+@[^\s@]+\.[^\s@]+$
+  DeployConformancePack:
+    Description: >-
+      Deploy the Config conformance pack. Requires an AWS Config recorder in
+      the account (deploy platforms/aws/baseline/account-baseline.yaml first).
+      Set false for accounts without Config.
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+
+Conditions:
+  ShouldDeployConformancePack: !Equals [!Ref DeployConformancePack, 'true']
 
 Resources:
 
@@ -80,6 +91,7 @@ Resources:
 
   BaselineConformancePack:
     Type: AWS::Config::ConformancePack
+    Condition: ShouldDeployConformancePack
     Properties:
       ConformancePackName: !Sub '${NamePrefix}-baseline'
       TemplateBody: |
@@ -140,5 +152,6 @@ Outputs:
     Value: !Sub '${NamePrefix}-monthly-budget'
     Export: {Name: !Sub '${NamePrefix}-budget'}
   ConformancePackName:
+    Condition: ShouldDeployConformancePack
     Value: !Sub '${NamePrefix}-baseline'
     Export: {Name: !Sub '${NamePrefix}-conformance-pack'}

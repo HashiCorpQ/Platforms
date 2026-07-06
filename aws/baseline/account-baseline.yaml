@@ -1,0 +1,118 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  HashiCorpQ platforms | account-baseline v1.0
+  Account-level singletons required before per-customer governance modules can
+  deploy: AWS Config recorder, delivery channel, delivery S3 bucket, and the
+  Config service-linked role. Deploy ONCE per account (directly or via
+  StackSet from Management). Not a per-customer module.
+
+Parameters:
+  CreateConfigServiceLinkedRole:
+    Description: >-
+      Create AWSServiceRoleForConfig. Singleton - set false if
+      'aws iam get-role --role-name AWSServiceRoleForConfig' already succeeds
+      in the target account.
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+  ConfigDeliveryFrequency:
+    Description: How often Config delivers configuration snapshots.
+    Type: String
+    Default: TwentyFour_Hours
+    AllowedValues: [One_Hour, Three_Hours, Six_Hours, Twelve_Hours, TwentyFour_Hours]
+
+Conditions:
+  ShouldCreateSlr: !Equals [!Ref CreateConfigServiceLinkedRole, 'true']
+
+Resources:
+
+  ConfigServiceLinkedRole:
+    Type: AWS::IAM::ServiceLinkedRole
+    Condition: ShouldCreateSlr
+    Properties:
+      AWSServiceName: config.amazonaws.com
+
+  ConfigDeliveryBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'config-delivery-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-config-history
+            Status: Enabled
+            ExpirationInDays: 365
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+      Tags:
+        - {Key: ManagedBy, Value: hashicorpq-platforms-baseline}
+
+  ConfigDeliveryBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ConfigDeliveryBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AWSConfigBucketPermissionsCheck
+            Effect: Allow
+            Principal: {Service: config.amazonaws.com}
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt ConfigDeliveryBucket.Arn
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: !Ref AWS::AccountId
+          - Sid: AWSConfigBucketExistenceCheck
+            Effect: Allow
+            Principal: {Service: config.amazonaws.com}
+            Action: s3:ListBucket
+            Resource: !GetAtt ConfigDeliveryBucket.Arn
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: !Ref AWS::AccountId
+          - Sid: AWSConfigBucketDelivery
+            Effect: Allow
+            Principal: {Service: config.amazonaws.com}
+            Action: s3:PutObject
+            Resource: !Sub '${ConfigDeliveryBucket.Arn}/AWSLogs/${AWS::AccountId}/Config/*'
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+                AWS:SourceAccount: !Ref AWS::AccountId
+
+  ConfigRecorder:
+    Type: AWS::Config::ConfigurationRecorder
+    DependsOn: ConfigDeliveryBucketPolicy
+    Properties:
+      Name: default
+      RoleARN: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/config.amazonaws.com/AWSServiceRoleForConfig'
+      RecordingGroup:
+        AllSupported: true
+        IncludeGlobalResourceTypes: true
+
+  ConfigDeliveryChannel:
+    Type: AWS::Config::DeliveryChannel
+    DependsOn: ConfigDeliveryBucketPolicy
+    Properties:
+      Name: default
+      S3BucketName: !Ref ConfigDeliveryBucket
+      ConfigSnapshotDeliveryProperties:
+        DeliveryFrequency: !Ref ConfigDeliveryFrequency
+
+Outputs:
+  ConfigBucket:
+    Value: !Ref ConfigDeliveryBucket
+  RecorderName:
+    Value: !Ref ConfigRecorder

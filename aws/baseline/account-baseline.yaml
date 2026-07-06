@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  HashiCorpQ platforms | account-baseline v1.0
+  HashiCorpQ platforms | account-baseline v1.1
   Account-level singletons required before per-customer governance modules can
   deploy: AWS Config recorder, delivery channel, delivery S3 bucket, and the
   Config service-linked role. Deploy ONCE per account (directly or via
@@ -20,9 +20,18 @@ Parameters:
     Type: String
     Default: TwentyFour_Hours
     AllowedValues: [One_Hour, Three_Hours, Six_Hours, Twelve_Hours, TwentyFour_Hours]
+  EnableSecurityHub:
+    Description: >-
+      Enable Security Hub with the CIS AWS Foundations Benchmark v3.0 standard.
+      Singleton - set false if 'aws securityhub describe-hub' already succeeds
+      in the target account (e.g. enabled via delegated admin).
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
 
 Conditions:
   ShouldCreateSlr: !Equals [!Ref CreateConfigServiceLinkedRole, 'true']
+  ShouldEnableSecurityHub: !Equals [!Ref EnableSecurityHub, 'true']
 
 Resources:
 
@@ -110,6 +119,23 @@ Resources:
       S3BucketName: !Ref ConfigDeliveryBucket
       ConfigSnapshotDeliveryProperties:
         DeliveryFrequency: !Ref ConfigDeliveryFrequency
+
+  SecurityHub:
+    Type: AWS::SecurityHub::Hub
+    Condition: ShouldEnableSecurityHub
+    DependsOn: ConfigRecorder
+    Properties:
+      EnableDefaultStandards: false
+      ControlFindingGenerator: SECURITY_CONTROL
+      Tags:
+        ManagedBy: hashicorpq-platforms-baseline
+
+  CisStandard:
+    Type: AWS::SecurityHub::Standard
+    Condition: ShouldEnableSecurityHub
+    DependsOn: SecurityHub
+    Properties:
+      StandardsArn: !Sub 'arn:${AWS::Partition}:securityhub:${AWS::Region}::standards/cis-aws-foundations-benchmark/v/3.0.0'
 
 Outputs:
   ConfigBucket:

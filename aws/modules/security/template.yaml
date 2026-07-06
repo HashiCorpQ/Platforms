@@ -1,0 +1,89 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  HashiCorpQ platforms | security module v1.0
+  Per-customer KMS customer-managed key with annual rotation and alias.
+  Storage and database modules import this key for encryption at rest.
+  Account-level security services (Security Hub, CIS standard) live in
+  account-baseline, not here - they are singletons.
+
+Parameters:
+  NamePrefix:
+    Description: Customer-program prefix (must match sibling modules).
+    Type: String
+    Default: webiq-core
+    AllowedPattern: ^[a-z][a-z0-9-]{2,30}$
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+  CostCenter:
+    Type: String
+    Default: Platform
+  DataClassification:
+    Type: String
+    Default: Confidential
+  ComplianceProfile:
+    Type: String
+    Default: commercial
+    AllowedValues: [commercial, government]
+
+Resources:
+
+  CustomerKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub 'Customer-managed key for ${NamePrefix} encryption at rest'
+      Enabled: true
+      EnableKeyRotation: true
+      KeySpec: SYMMETRIC_DEFAULT
+      KeyUsage: ENCRYPT_DECRYPT
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableRootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowAccountServicesUse
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'
+            Condition:
+              StringEquals:
+                kms:CallerAccount: !Ref AWS::AccountId
+      Tags:
+        - {Key: Name, Value: !Sub '${NamePrefix}-cmk'}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+        - {Key: ComplianceProfile, Value: !Ref ComplianceProfile}
+        - {Key: ManagedBy, Value: hashicorpq-platforms}
+
+  CustomerKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${NamePrefix}'
+      TargetKeyId: !Ref CustomerKey
+
+Outputs:
+  KeyArn:
+    Description: CMK ARN for storage/database module imports.
+    Value: !GetAtt CustomerKey.Arn
+    Export: {Name: !Sub '${NamePrefix}-kms-key-arn'}
+  KeyId:
+    Value: !Ref CustomerKey
+    Export: {Name: !Sub '${NamePrefix}-kms-key-id'}
+  KeyAlias:
+    Value: !Ref CustomerKeyAlias
+    Export: {Name: !Sub '${NamePrefix}-kms-alias'}

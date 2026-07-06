@@ -234,6 +234,45 @@ Resources:
                   - config:DescribeConformancePackStatus
                   - config:GetConformancePackComplianceSummary
                 Resource: '*'
+              - Sid: KmsCreate
+                Effect: Allow
+                Action:
+                  - kms:CreateKey
+                Resource: '*'
+              - Sid: KmsManage
+                Effect: Allow
+                Action:
+                  - kms:DescribeKey
+                  - kms:EnableKeyRotation
+                  - kms:DisableKeyRotation
+                  - kms:GetKeyRotationStatus
+                  - kms:PutKeyPolicy
+                  - kms:GetKeyPolicy
+                  - kms:ScheduleKeyDeletion
+                  - kms:CancelKeyDeletion
+                  - kms:EnableKey
+                  - kms:DisableKey
+                  - kms:TagResource
+                  - kms:UntagResource
+                  - kms:ListResourceTags
+                  - kms:UpdateKeyDescription
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:kms:*:${AWS::AccountId}:key/*'
+              - Sid: KmsAlias
+                Effect: Allow
+                Action:
+                  - kms:CreateAlias
+                  - kms:DeleteAlias
+                  - kms:UpdateAlias
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:kms:*:${AWS::AccountId}:alias/${CustomerPrefix}-*'
+                  - !Sub 'arn:${AWS::Partition}:kms:*:${AWS::AccountId}:key/*'
+              - Sid: KmsListReads
+                Effect: Allow
+                Action:
+                  - kms:ListAliases
+                  - kms:ListKeys
+                Resource: '*'
               - Sid: ConfigConformsServiceLinkedRole
                 Effect: Allow
                 Action:

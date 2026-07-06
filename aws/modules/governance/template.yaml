@@ -1,0 +1,144 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  HashiCorpQ platforms | governance module v1.0
+  Per-customer FinOps budget (actual 80% + forecasted 100% alerts) and an
+  AWS Config conformance pack of managed compliance rules. Requires the
+  account to have a Config recorder (Control Tower enrolled accounts do).
+  The decision-making services live here: Config evaluates compliance
+  continuously; budgets watch spend.
+
+Parameters:
+  NamePrefix:
+    Description: Customer-program prefix (must match the networking module's).
+    Type: String
+    Default: webiq-core
+    AllowedPattern: ^[a-z][a-z0-9-]{2,30}$
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+  CostCenter:
+    Type: String
+    Default: Platform
+  DataClassification:
+    Type: String
+    Default: Confidential
+  ComplianceProfile:
+    Description: commercial = CIS-aligned baseline rules. government adds stricter variants in v2.
+    Type: String
+    Default: commercial
+    AllowedValues: [commercial, government]
+  MonthlyBudgetLimit:
+    Description: Monthly cost threshold (USD) for this customer-program.
+    Type: Number
+    Default: 100
+  BudgetNotificationEmail:
+    Description: Email for budget notifications (FinOps).
+    Type: String
+    Default: aws.administrator+FinOps@angsignal.com
+    AllowedPattern: ^[^\s@]+@[^\s@]+\.[^\s@]+$
+
+Resources:
+
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      ResourceTags:
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+        - {Key: ComplianceProfile, Value: !Ref ComplianceProfile}
+      Budget:
+        BudgetName: !Sub '${NamePrefix}-monthly-budget'
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetLimit
+          Unit: USD
+        TimeUnit: MONTHLY
+        BudgetType: COST
+        CostTypes:
+          IncludeTax: true
+          IncludeSubscription: true
+          UseBlended: false
+          UseAmortized: false
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref BudgetNotificationEmail
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref BudgetNotificationEmail
+
+  BaselineConformancePack:
+    Type: AWS::Config::ConformancePack
+    Properties:
+      ConformancePackName: !Sub '${NamePrefix}-baseline'
+      TemplateBody: |
+        Resources:
+          RequiredTags:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: required-tags-baseline
+              Source:
+                Owner: AWS
+                SourceIdentifier: REQUIRED_TAGS
+              InputParameters:
+                tag1Key: Environment
+                tag2Key: CostCenter
+              Scope:
+                ComplianceResourceTypes:
+                  - AWS::EC2::VPC
+                  - AWS::EC2::Subnet
+                  - AWS::EC2::SecurityGroup
+          EncryptedVolumes:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: encrypted-volumes-baseline
+              Source:
+                Owner: AWS
+                SourceIdentifier: ENCRYPTED_VOLUMES
+          S3PublicReadProhibited:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: s3-public-read-prohibited-baseline
+              Source:
+                Owner: AWS
+                SourceIdentifier: S3_BUCKET_PUBLIC_READ_PROHIBITED
+          S3PublicWriteProhibited:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: s3-public-write-prohibited-baseline
+              Source:
+                Owner: AWS
+                SourceIdentifier: S3_BUCKET_PUBLIC_WRITE_PROHIBITED
+          VpcFlowLogsEnabled:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: vpc-flow-logs-enabled-baseline
+              Source:
+                Owner: AWS
+                SourceIdentifier: VPC_FLOW_LOGS_ENABLED
+          RestrictedSSH:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: restricted-ssh-baseline
+              Source:
+                Owner: AWS
+                SourceIdentifier: INCOMING_SSH_DISABLED
+
+Outputs:
+  BudgetName:
+    Value: !Sub '${NamePrefix}-monthly-budget'
+    Export: {Name: !Sub '${NamePrefix}-budget'}
+  ConformancePackName:
+    Value: !Sub '${NamePrefix}-baseline'
+    Export: {Name: !Sub '${NamePrefix}-conformance-pack'}

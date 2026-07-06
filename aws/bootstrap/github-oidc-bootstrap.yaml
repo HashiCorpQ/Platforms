@@ -210,6 +210,37 @@ Resources:
                   - logs:ListTagsForResource
                 Resource:
                   - !Sub 'arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/vpc/${CustomerPrefix}-*'
+              - Sid: BudgetsOps
+                Effect: Allow
+                Action:
+                  - budgets:ModifyBudget
+                  - budgets:ViewBudget
+                  - budgets:TagResource
+                  - budgets:UntagResource
+                  - budgets:ListTagsForResource
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:budgets::${AWS::AccountId}:budget/${CustomerPrefix}-*'
+              - Sid: ConfigConformancePackOps
+                Effect: Allow
+                Action:
+                  - config:PutConformancePack
+                  - config:DeleteConformancePack
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:config:*:${AWS::AccountId}:conformance-pack/${CustomerPrefix}-*'
+              - Sid: ConfigReads
+                Effect: Allow
+                Action:
+                  - config:DescribeConformancePacks
+                  - config:DescribeConformancePackStatus
+                  - config:GetConformancePackComplianceSummary
+                Resource: '*'
+              - Sid: ConfigConformsServiceLinkedRole
+                Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                  - iam:GetRole
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/config-conforms.amazonaws.com/AWSServiceRoleForConfigConforms'
       Tags:
         - {Key: Customer, Value: !Ref CustomerPrefix}
         - {Key: Environment, Value: !Ref EnvironmentName}

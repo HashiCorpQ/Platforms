@@ -166,6 +166,17 @@ Resources:
                   - ec2:DescribeTags
                   - ec2:DescribeAvailabilityZones
                   - ec2:DescribeAccountAttributes
+                  - ec2:CreateLaunchTemplate
+                  - ec2:DeleteLaunchTemplate
+                  - ec2:ModifyLaunchTemplate
+                  - ec2:CreateLaunchTemplateVersion
+                  - ec2:DeleteLaunchTemplateVersions
+                  - ec2:DescribeLaunchTemplates
+                  - ec2:DescribeLaunchTemplateVersions
+                  - ec2:GetLaunchTemplateData
+                  - ec2:RunInstances
+                  - ec2:DescribeInstances
+                  - ec2:DescribeImages
                 Resource: '*'
               - Sid: IAMRoleOpsScopedToCustomer
                 Effect: Allow
@@ -210,6 +221,7 @@ Resources:
                   - logs:ListTagsForResource
                 Resource:
                   - !Sub 'arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/vpc/${CustomerPrefix}-*'
+                  - !Sub 'arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/ecs/${CustomerPrefix}-*'
               - Sid: BudgetsOps
                 Effect: Allow
                 Action:
@@ -273,6 +285,62 @@ Resources:
                   - kms:ListAliases
                   - kms:ListKeys
                 Resource: '*'
+              - Sid: EcsClusterOps
+                Effect: Allow
+                Action:
+                  - ecs:CreateCluster
+                  - ecs:DeleteCluster
+                  - ecs:DescribeClusters
+                  - ecs:UpdateCluster
+                  - ecs:PutClusterCapacityProviders
+                  - ecs:TagResource
+                  - ecs:UntagResource
+                  - ecs:ListTagsForResource
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:cluster/${CustomerPrefix}-*'
+              - Sid: EcsReads
+                Effect: Allow
+                Action:
+                  - ecs:DescribeCapacityProviders
+                Resource: '*'
+              - Sid: AutoScalingOps
+                Effect: Allow
+                Action:
+                  - autoscaling:CreateAutoScalingGroup
+                  - autoscaling:UpdateAutoScalingGroup
+                  - autoscaling:DeleteAutoScalingGroup
+                  - autoscaling:PutScalingPolicy
+                  - autoscaling:DeletePolicy
+                  - autoscaling:CreateOrUpdateTags
+                  - autoscaling:DeleteTags
+                  - autoscaling:EnableMetricsCollection
+                  - autoscaling:DisableMetricsCollection
+                  - autoscaling:SetDesiredCapacity
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:autoscaling:*:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/${CustomerPrefix}-*'
+              - Sid: AutoScalingReads
+                Effect: Allow
+                Action:
+                  - autoscaling:DescribeAutoScalingGroups
+                  - autoscaling:DescribeScalingActivities
+                  - autoscaling:DescribePolicies
+                  - autoscaling:DescribeAutoScalingInstances
+                Resource: '*'
+              - Sid: SsmPublicAmiParameter
+                Effect: Allow
+                Action:
+                  - ssm:GetParameters
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ssm:*::parameter/aws/service/ami-amazon-linux-latest/*'
+              - Sid: ComputeServiceLinkedRoles
+                Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                  - iam:GetRole
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling'
               - Sid: ConfigConformsServiceLinkedRole
                 Effect: Allow
                 Action:

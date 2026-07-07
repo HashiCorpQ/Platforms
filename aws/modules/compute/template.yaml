@@ -1,14 +1,15 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  HashiCorpQ platforms | security module v1.0
-  Per-customer KMS customer-managed key with annual rotation and alias.
-  Storage and database modules import this key for encryption at rest.
-  Account-level security services (Security Hub, CIS standard) live in
-  account-baseline, not here - they are singletons.
+  HashiCorpQ platforms | compute module v1.0
+  ECS Fargate cluster (SPOT-first), consolidated SSM-managed instance role,
+  launch template, and an Auto Scaling group with CPU target-tracking.
+  IMPORTS the networking module's exports (deploy networking first with the
+  same NamePrefix). Idles at zero cost: empty Fargate cluster is free and
+  the ASG defaults to Desired=0.
 
 Parameters:
   NamePrefix:
-    Description: Customer-program prefix (must match sibling modules).
+    Description: Customer-program prefix. MUST match the deployed networking module.
     Type: String
     Default: webiq-core
     AllowedPattern: ^[a-z][a-z0-9-]{2,30}$
@@ -26,64 +27,162 @@ Parameters:
     Type: String
     Default: commercial
     AllowedValues: [commercial, government]
+  InstanceType:
+    Description: Instance type for the EC2 Auto Scaling group.
+    Type: String
+    Default: t3.micro
+  AsgDesiredCapacity:
+    Description: Desired instances. Default 0 = zero idle cost; raise to activate.
+    Type: Number
+    Default: 0
+    MinValue: 0
+    MaxValue: 4
+  AsgMaxSize:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 4
+  LatestAl2023AmiId:
+    Description: Resolved automatically from the SSM public parameter. Do not override.
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
 
 Resources:
 
-  CustomerKey:
-    Type: AWS::KMS::Key
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
+  # ------------------------------------------------------------------ ECS
+  FargateCluster:
+    Type: AWS::ECS::Cluster
     Properties:
-      Description: !Sub 'Customer-managed key for ${NamePrefix} encryption at rest'
-      Enabled: true
-      EnableKeyRotation: true
-      KeySpec: SYMMETRIC_DEFAULT
-      KeyUsage: ENCRYPT_DECRYPT
-      KeyPolicy:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: EnableRootAccountAdmin
-            Effect: Allow
-            Principal:
-              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
-            Action: 'kms:*'
-            Resource: '*'
-          - Sid: AllowAccountServicesUse
-            Effect: Allow
-            Principal:
-              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
-            Action:
-              - kms:Encrypt
-              - kms:Decrypt
-              - kms:ReEncrypt*
-              - kms:GenerateDataKey*
-              - kms:DescribeKey
-            Resource: '*'
-            Condition:
-              StringEquals:
-                kms:CallerAccount: !Ref AWS::AccountId
+      ClusterName: !Sub '${NamePrefix}-cluster'
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 1
+          Base: 0
       Tags:
-        - {Key: Name, Value: !Sub '${NamePrefix}-cmk'}
         - {Key: Environment, Value: !Ref Environment}
         - {Key: CostCenter, Value: !Ref CostCenter}
         - {Key: DataClassification, Value: !Ref DataClassification}
         - {Key: ComplianceProfile, Value: !Ref ComplianceProfile}
         - {Key: ManagedBy, Value: hashicorpq-platforms}
 
-  CustomerKeyAlias:
-    Type: AWS::KMS::Alias
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
     Properties:
-      AliasName: !Sub 'alias/${NamePrefix}'
-      TargetKeyId: !Ref CustomerKey
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ecs-tasks.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+      Tags:
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: ManagedBy, Value: hashicorpq-platforms}
+
+  TaskLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${NamePrefix}/tasks'
+      RetentionInDays: 30
+
+  # ------------------------------------------------------------------ EC2
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
+      Tags:
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: ManagedBy, Value: hashicorpq-platforms}
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  WorkloadLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub '${NamePrefix}-workload'
+      LaunchTemplateData:
+        ImageId: !Ref LatestAl2023AmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt InstanceProfile.Arn
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub '${NamePrefix}-sg-ai'
+        MetadataOptions:
+          HttpTokens: required
+          HttpEndpoint: enabled
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 20
+              VolumeType: gp3
+              Encrypted: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - {Key: Name, Value: !Sub '${NamePrefix}-workload'}
+              - {Key: Environment, Value: !Ref Environment}
+              - {Key: CostCenter, Value: !Ref CostCenter}
+              - {Key: DataClassification, Value: !Ref DataClassification}
+
+  WorkloadAsg:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub '${NamePrefix}-workload-asg'
+      MinSize: '0'
+      MaxSize: !Ref AsgMaxSize
+      DesiredCapacity: !Ref AsgDesiredCapacity
+      LaunchTemplate:
+        LaunchTemplateId: !Ref WorkloadLaunchTemplate
+        Version: !GetAtt WorkloadLaunchTemplate.LatestVersionNumber
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub '${NamePrefix}-subnet-app-a'
+        - Fn::ImportValue: !Sub '${NamePrefix}-subnet-app-b'
+        - Fn::ImportValue: !Sub '${NamePrefix}-subnet-app-c'
+      MetricsCollection:
+        - Granularity: 1Minute
+      Tags:
+        - {Key: Environment, Value: !Ref Environment, PropagateAtLaunch: true}
+        - {Key: CostCenter, Value: !Ref CostCenter, PropagateAtLaunch: true}
+        - {Key: ManagedBy, Value: hashicorpq-platforms, PropagateAtLaunch: false}
+
+  CpuTargetTracking:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref WorkloadAsg
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 60
 
 Outputs:
-  KeyArn:
-    Description: CMK ARN for storage/database module imports.
-    Value: !GetAtt CustomerKey.Arn
-    Export: {Name: !Sub '${NamePrefix}-kms-key-arn'}
-  KeyId:
-    Value: !Ref CustomerKey
-    Export: {Name: !Sub '${NamePrefix}-kms-key-id'}
-  KeyAlias:
-    Value: !Ref CustomerKeyAlias
-    Export: {Name: !Sub '${NamePrefix}-kms-alias'}
+  ClusterName:
+    Value: !Ref FargateCluster
+    Export: {Name: !Sub '${NamePrefix}-ecs-cluster'}
+  ClusterArn:
+    Value: !GetAtt FargateCluster.Arn
+    Export: {Name: !Sub '${NamePrefix}-ecs-cluster-arn'}
+  TaskExecutionRoleArn:
+    Value: !GetAtt TaskExecutionRole.Arn
+    Export: {Name: !Sub '${NamePrefix}-task-exec-role'}
+  TaskLogGroupName:
+    Value: !Ref TaskLogGroup
+    Export: {Name: !Sub '${NamePrefix}-task-log-group'}
+  AsgName:
+    Value: !Ref WorkloadAsg
+    Export: {Name: !Sub '${NamePrefix}-workload-asg'}

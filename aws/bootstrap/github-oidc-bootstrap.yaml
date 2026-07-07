@@ -341,6 +341,31 @@ Resources:
                 Resource:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS'
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling'
+              - Sid: S3BucketOps
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:DeleteBucket
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                  - s3:GetBucketAcl
+                  - s3:PutBucketPolicy
+                  - s3:GetBucketPolicy
+                  - s3:DeleteBucketPolicy
+                  - s3:PutEncryptionConfiguration
+                  - s3:GetEncryptionConfiguration
+                  - s3:PutBucketVersioning
+                  - s3:GetBucketVersioning
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:GetBucketPublicAccessBlock
+                  - s3:PutLifecycleConfiguration
+                  - s3:GetLifecycleConfiguration
+                  - s3:PutBucketTagging
+                  - s3:GetBucketTagging
+                  - s3:PutBucketOwnershipControls
+                  - s3:GetBucketOwnershipControls
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${CustomerPrefix}-*'
               - Sid: ConfigConformsServiceLinkedRole
                 Effect: Allow
                 Action:

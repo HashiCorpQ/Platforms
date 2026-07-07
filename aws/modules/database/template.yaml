@@ -1,0 +1,119 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  HashiCorpQ platforms | database module v1.0
+  DB subnet group (always) plus optional Aurora Serverless v2 PostgreSQL
+  cluster that scales to zero ACUs when idle. IMPORTS networking (db subnets,
+  db security group) and security (KMS CMK) - deploy both first with the same
+  NamePrefix. CreateCluster=false (default) deploys only the free subnet
+  group; flip to true to materialize the database.
+
+Parameters:
+  NamePrefix:
+    Description: Customer-program prefix. MUST match deployed networking and security modules.
+    Type: String
+    Default: webiq-core
+    AllowedPattern: ^[a-z][a-z0-9-]{2,30}$
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+  CostCenter:
+    Type: String
+    Default: Platform
+  DataClassification:
+    Type: String
+    Default: Confidential
+  ComplianceProfile:
+    Type: String
+    Default: commercial
+    AllowedValues: [commercial, government]
+  CreateCluster:
+    Description: >-
+      Create the Aurora Serverless v2 cluster. Default false = subnet group
+      only (zero cost). When true, requires the security module's key policy
+      to allow kms:CreateGrant for AWS resources (security module >= v1.1).
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  MaxCapacityAcu:
+    Description: Aurora Serverless v2 maximum capacity (ACUs). Minimum is 0 (scales to zero when idle).
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 8
+
+Conditions:
+  ShouldCreateCluster: !Equals [!Ref CreateCluster, 'true']
+
+Resources:
+
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub '${NamePrefix}-db'
+      DBSubnetGroupDescription: !Sub 'Private db-tier subnets for ${NamePrefix}'
+      SubnetIds:
+        - Fn::ImportValue: !Sub '${NamePrefix}-subnet-db-a'
+        - Fn::ImportValue: !Sub '${NamePrefix}-subnet-db-b'
+        - Fn::ImportValue: !Sub '${NamePrefix}-subnet-db-c'
+      Tags:
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+        - {Key: ComplianceProfile, Value: !Ref ComplianceProfile}
+        - {Key: ManagedBy, Value: hashicorpq-platforms}
+
+  AuroraCluster:
+    Type: AWS::RDS::DBCluster
+    Condition: ShouldCreateCluster
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBClusterIdentifier: !Sub '${NamePrefix}-aurora'
+      Engine: aurora-postgresql
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VpcSecurityGroupIds:
+        - Fn::ImportValue: !Sub '${NamePrefix}-sg-db'
+      StorageEncrypted: true
+      KmsKeyId:
+        Fn::ImportValue: !Sub '${NamePrefix}-kms-key-arn'
+      MasterUsername: dbadmin
+      ManageMasterUserPassword: true
+      ServerlessV2ScalingConfiguration:
+        MinCapacity: 0
+        MaxCapacity: !Ref MaxCapacityAcu
+      BackupRetentionPeriod: 7
+      DeletionProtection: false
+      Tags:
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+        - {Key: ManagedBy, Value: hashicorpq-platforms}
+
+  AuroraInstance:
+    Type: AWS::RDS::DBInstance
+    Condition: ShouldCreateCluster
+    Properties:
+      DBInstanceIdentifier: !Sub '${NamePrefix}-aurora-1'
+      DBClusterIdentifier: !Ref AuroraCluster
+      DBInstanceClass: db.serverless
+      Engine: aurora-postgresql
+      PubliclyAccessible: false
+      Tags:
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: ManagedBy, Value: hashicorpq-platforms}
+
+Outputs:
+  DbSubnetGroupName:
+    Value: !Ref DbSubnetGroup
+    Export: {Name: !Sub '${NamePrefix}-db-subnet-group'}
+  ClusterEndpoint:
+    Condition: ShouldCreateCluster
+    Value: !GetAtt AuroraCluster.Endpoint.Address
+    Export: {Name: !Sub '${NamePrefix}-db-endpoint'}
+  ClusterMasterSecretArn:
+    Condition: ShouldCreateCluster
+    Description: Secrets Manager ARN of the RDS-managed master password.
+    Value: !GetAtt AuroraCluster.MasterUserSecret.SecretArn
+    Export: {Name: !Sub '${NamePrefix}-db-master-secret'}

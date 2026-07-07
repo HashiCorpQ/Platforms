@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  HashiCorpQ platforms | security module v1.0
+  HashiCorpQ platforms | security module v1.1
   Per-customer KMS customer-managed key with annual rotation and alias.
   Storage and database modules import this key for encryption at rest.
   Account-level security services (Security Hub, CIS standard) live in
@@ -62,6 +62,18 @@ Resources:
             Condition:
               StringEquals:
                 kms:CallerAccount: !Ref AWS::AccountId
+          - Sid: AllowGrantsForAwsResources
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action:
+              - kms:CreateGrant
+              - kms:ListGrants
+              - kms:RevokeGrant
+            Resource: '*'
+            Condition:
+              Bool:
+                kms:GrantIsForAWSResource: 'true'
       Tags:
         - {Key: Name, Value: !Sub '${NamePrefix}-cmk'}
         - {Key: Environment, Value: !Ref Environment}

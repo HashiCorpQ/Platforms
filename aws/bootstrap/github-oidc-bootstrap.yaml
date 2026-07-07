@@ -366,6 +366,65 @@ Resources:
                   - s3:GetBucketOwnershipControls
                 Resource:
                   - !Sub 'arn:${AWS::Partition}:s3:::${CustomerPrefix}-*'
+              - Sid: RdsOps
+                Effect: Allow
+                Action:
+                  - rds:CreateDBSubnetGroup
+                  - rds:DeleteDBSubnetGroup
+                  - rds:ModifyDBSubnetGroup
+                  - rds:CreateDBCluster
+                  - rds:DeleteDBCluster
+                  - rds:ModifyDBCluster
+                  - rds:CreateDBInstance
+                  - rds:DeleteDBInstance
+                  - rds:ModifyDBInstance
+                  - rds:AddTagsToResource
+                  - rds:RemoveTagsFromResource
+                  - rds:ListTagsForResource
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:rds:*:${AWS::AccountId}:subgrp:${CustomerPrefix}-*'
+                  - !Sub 'arn:${AWS::Partition}:rds:*:${AWS::AccountId}:cluster:${CustomerPrefix}-*'
+                  - !Sub 'arn:${AWS::Partition}:rds:*:${AWS::AccountId}:db:${CustomerPrefix}-*'
+                  - !Sub 'arn:${AWS::Partition}:rds:*:${AWS::AccountId}:cluster-snapshot:${CustomerPrefix}-*'
+              - Sid: RdsReads
+                Effect: Allow
+                Action:
+                  - rds:DescribeDBSubnetGroups
+                  - rds:DescribeDBClusters
+                  - rds:DescribeDBInstances
+                  - rds:DescribeDBClusterSnapshots
+                  - rds:DescribeGlobalClusters
+                Resource: '*'
+              - Sid: RdsManagedSecrets
+                Effect: Allow
+                Action:
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:DeleteSecret
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:TagResource
+                  - secretsmanager:UntagResource
+                  - secretsmanager:RotateSecret
+                  - secretsmanager:UpdateSecret
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:secretsmanager:*:${AWS::AccountId}:secret:rds!*'
+              - Sid: KmsGrantsForAwsResources
+                Effect: Allow
+                Action:
+                  - kms:CreateGrant
+                  - kms:ListGrants
+                  - kms:RevokeGrant
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:kms:*:${AWS::AccountId}:key/*'
+                Condition:
+                  Bool:
+                    kms:GrantIsForAWSResource: 'true'
+              - Sid: RdsServiceLinkedRole
+                Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                  - iam:GetRole
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/rds.amazonaws.com/AWSServiceRoleForRDS'
               - Sid: ConfigConformsServiceLinkedRole
                 Effect: Allow
                 Action:

@@ -222,6 +222,7 @@ Resources:
                 Resource:
                   - !Sub 'arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/vpc/${CustomerPrefix}-*'
                   - !Sub 'arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/ecs/${CustomerPrefix}-*'
+                  - !Sub 'arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/ml/${CustomerPrefix}-*'
               - Sid: BudgetsOps
                 Effect: Allow
                 Action:
@@ -425,6 +426,39 @@ Resources:
                   - iam:GetRole
                 Resource:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/rds.amazonaws.com/AWSServiceRoleForRDS'
+              - Sid: EcrOps
+                Effect: Allow
+                Action:
+                  - ecr:CreateRepository
+                  - ecr:DeleteRepository
+                  - ecr:DescribeRepositories
+                  - ecr:PutLifecyclePolicy
+                  - ecr:GetLifecyclePolicy
+                  - ecr:DeleteLifecyclePolicy
+                  - ecr:PutImageTagMutability
+                  - ecr:PutImageScanningConfiguration
+                  - ecr:TagResource
+                  - ecr:UntagResource
+                  - ecr:ListTagsForResource
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ecr:*:${AWS::AccountId}:repository/${CustomerPrefix}-*'
+              - Sid: BedrockGuardrailOps
+                Effect: Allow
+                Action:
+                  - bedrock:CreateGuardrail
+                  - bedrock:DeleteGuardrail
+                  - bedrock:GetGuardrail
+                  - bedrock:UpdateGuardrail
+                  - bedrock:TagResource
+                  - bedrock:UntagResource
+                  - bedrock:ListTagsForResource
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:guardrail/*'
+              - Sid: BedrockGuardrailCreate
+                Effect: Allow
+                Action:
+                  - bedrock:CreateGuardrail
+                Resource: '*'
               - Sid: ConfigConformsServiceLinkedRole
                 Effect: Allow
                 Action:

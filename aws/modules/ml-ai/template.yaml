@@ -1,0 +1,157 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  HashiCorpQ platforms | ml-ai module v1.0
+  GenAI/ML foundation: CMK-encrypted ECR repository for model containers,
+  Bedrock guardrail (content-policy governance for GenAI), SageMaker
+  execution role scoped to the customer data bucket, and an ML log group.
+  IMPORTS security (KMS CMK) and storage (data bucket) - deploy both first.
+  Zero idle cost: every resource here is free until used.
+
+Parameters:
+  NamePrefix:
+    Description: Customer-program prefix. MUST match deployed security and storage modules.
+    Type: String
+    Default: webiq-core
+    AllowedPattern: ^[a-z][a-z0-9-]{2,30}$
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+  CostCenter:
+    Type: String
+    Default: Platform
+  DataClassification:
+    Type: String
+    Default: Confidential
+  ComplianceProfile:
+    Type: String
+    Default: commercial
+    AllowedValues: [commercial, government]
+  GuardrailFilterStrength:
+    Description: Strength applied to all Bedrock guardrail content filters.
+    Type: String
+    Default: HIGH
+    AllowedValues: [NONE, LOW, MEDIUM, HIGH]
+
+Resources:
+
+  ModelRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub '${NamePrefix}-models'
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey:
+          Fn::ImportValue: !Sub '${NamePrefix}-kms-key-arn'
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire untagged images after 14 days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 14
+                },
+                "action": {"type": "expire"}
+              }
+            ]
+          }
+      Tags:
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: DataClassification, Value: !Ref DataClassification}
+        - {Key: ComplianceProfile, Value: !Ref ComplianceProfile}
+        - {Key: ManagedBy, Value: hashicorpq-platforms}
+
+  GenAiGuardrail:
+    Type: AWS::Bedrock::Guardrail
+    Properties:
+      Name: !Sub '${NamePrefix}-guardrail'
+      Description: Baseline content-policy guardrail for GenAI workloads.
+      BlockedInputMessaging: This request was blocked by the content policy.
+      BlockedOutputsMessaging: The response was blocked by the content policy.
+      ContentPolicyConfig:
+        FiltersConfig:
+          - {Type: SEXUAL, InputStrength: !Ref GuardrailFilterStrength, OutputStrength: !Ref GuardrailFilterStrength}
+          - {Type: VIOLENCE, InputStrength: !Ref GuardrailFilterStrength, OutputStrength: !Ref GuardrailFilterStrength}
+          - {Type: HATE, InputStrength: !Ref GuardrailFilterStrength, OutputStrength: !Ref GuardrailFilterStrength}
+          - {Type: INSULTS, InputStrength: !Ref GuardrailFilterStrength, OutputStrength: !Ref GuardrailFilterStrength}
+          - {Type: MISCONDUCT, InputStrength: !Ref GuardrailFilterStrength, OutputStrength: !Ref GuardrailFilterStrength}
+          - {Type: PROMPT_ATTACK, InputStrength: !Ref GuardrailFilterStrength, OutputStrength: NONE}
+      Tags:
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: CostCenter, Value: !Ref CostCenter}
+        - {Key: ManagedBy, Value: hashicorpq-platforms}
+
+  MlLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ml/${NamePrefix}/workloads'
+      RetentionInDays: 30
+
+  SageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: sagemaker.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ml-data-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DataBucketAccess
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - Fn::ImportValue: !Sub '${NamePrefix}-data-bucket-arn'
+                  - !Sub
+                    - '${BucketArn}/*'
+                    - BucketArn:
+                        Fn::ImportValue: !Sub '${NamePrefix}-data-bucket-arn'
+              - Sid: CmkUse
+                Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:Decrypt
+                  - kms:GenerateDataKey*
+                  - kms:DescribeKey
+                Resource:
+                  - Fn::ImportValue: !Sub '${NamePrefix}-kms-key-arn'
+              - Sid: MlLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub '${MlLogGroup.Arn}:*'
+      Tags:
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: ManagedBy, Value: hashicorpq-platforms}
+
+Outputs:
+  ModelRepositoryUri:
+    Value: !GetAtt ModelRepository.RepositoryUri
+    Export: {Name: !Sub '${NamePrefix}-model-repo-uri'}
+  GuardrailId:
+    Value: !GetAtt GenAiGuardrail.GuardrailId
+    Export: {Name: !Sub '${NamePrefix}-guardrail-id'}
+  SageMakerExecutionRoleArn:
+    Value: !GetAtt SageMakerExecutionRole.Arn
+    Export: {Name: !Sub '${NamePrefix}-sagemaker-role'}
+  MlLogGroupName:
+    Value: !Ref MlLogGroup
+    Export: {Name: !Sub '${NamePrefix}-ml-log-group'}

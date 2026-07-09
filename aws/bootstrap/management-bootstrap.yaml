@@ -1,0 +1,102 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  HashiCorpQ platforms | management-bootstrap v1.0
+  ONE-TIME manual deploy in the Management account (service-managed StackSets
+  cannot target Management, so this cannot come from a StackSet). Creates the
+  GitHub OIDC provider (conditional singleton) and a narrowly-scoped role that
+  lets the Platforms repo's bootstrap.yml workflow update the gha-oidc-*
+  StackSets automatically when the bootstrap template changes.
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: HashiCorpQ
+  PlatformsRepo:
+    Description: Repository holding the bootstrap template and bootstrap.yml workflow.
+    Type: String
+    Default: Platforms
+  GitHubEnvironment:
+    Description: Reviewer-protected GitHub environment gating StackSet updates.
+    Type: String
+    Default: management
+  CreateOidcProvider:
+    Description: >-
+      Singleton. Set false if 'aws iam list-open-id-connect-providers' already
+      shows token.actions.githubusercontent.com in the MANAGEMENT account.
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+
+Conditions:
+  ShouldCreateProvider: !Equals [!Ref CreateOidcProvider, 'true']
+
+Resources:
+
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  StackSetAdminRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: gha-platforms-stackset-admin
+      Description: !Sub 'Lets ${GitHubOrg}/${PlatformsRepo} bootstrap.yml update gha-oidc-* StackSets'
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: GitHubActionsOIDC
+            Effect: Allow
+            Principal:
+              Federated: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub 'repo:${GitHubOrg}/${PlatformsRepo}:ref:refs/heads/main'
+                  - !Sub 'repo:${GitHubOrg}/${PlatformsRepo}:environment:${GitHubEnvironment}'
+      Policies:
+        - PolicyName: stackset-admin
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: StackSetOps
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateStackSet
+                  - cloudformation:UpdateStackSet
+                  - cloudformation:CreateStackInstances
+                  - cloudformation:DescribeStackSet
+                  - cloudformation:DescribeStackSetOperation
+                  - cloudformation:ListStackSetOperations
+                  - cloudformation:ListStackInstances
+                  - cloudformation:TagResource
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stackset/gha-oidc-*'
+                  - !Sub 'arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stackset-target/gha-oidc-*'
+                  - !Sub 'arn:${AWS::Partition}:cloudformation:*::type/resource/*'
+              - Sid: OrgReadsForServiceManaged
+                Effect: Allow
+                Action:
+                  - organizations:ListRoots
+                  - organizations:ListOrganizationalUnitsForParent
+                  - organizations:ListParents
+                  - organizations:ListAccounts
+                  - organizations:ListAccountsForParent
+                  - organizations:DescribeOrganization
+                Resource: '*'
+      Tags:
+        - {Key: ManagedBy, Value: hashicorpq-platforms-bootstrap}
+
+Outputs:
+  StackSetAdminRoleArn:
+    Description: Role ARN for the Platforms bootstrap.yml workflow.
+    Value: !GetAtt StackSetAdminRole.Arn

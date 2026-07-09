@@ -1,0 +1,82 @@
+# Platforms | bootstrap.yml
+# Automates "step 3": whenever the OIDC bootstrap template changes on main,
+# this updates the gha-oidc-webiq StackSet in the Management account so the
+# customer deployment roles pick up new permissions automatically.
+# Gated by the reviewer-protected 'management' environment.
+
+name: Update OIDC bootstrap StackSet
+
+on:
+  push:
+    branches: [main]
+    paths: ['aws/bootstrap/github-oidc-bootstrap.yaml']
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  STACK_SET: gha-oidc-webiq
+  TEMPLATE: aws/bootstrap/github-oidc-bootstrap.yaml
+  ADMIN_ROLE_ARN: arn:aws:iam::034362030640:role/gha-platforms-stackset-admin
+
+jobs:
+  update-stackset:
+    name: Update StackSet in Management
+    runs-on: ubuntu-latest
+    environment: management
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python and cfn-lint
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install cfn-lint
+      - run: cfn-lint ${{ env.TEMPLATE }}
+
+      - name: Configure AWS credentials (OIDC -> Management)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ADMIN_ROLE_ARN }}
+          role-session-name: gha-bootstrap-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update StackSet
+        run: |
+          aws cloudformation update-stack-set \
+            --stack-set-name ${{ env.STACK_SET }} \
+            --template-body file://${{ env.TEMPLATE }} \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameters \
+              ParameterKey=GitHubOrg,UsePreviousValue=true \
+              ParameterKey=GitHubRepo,UsePreviousValue=true \
+              ParameterKey=GitHubEnvironment,UsePreviousValue=true \
+              ParameterKey=CustomerPrefix,UsePreviousValue=true \
+              ParameterKey=EnvironmentName,UsePreviousValue=true \
+              ParameterKey=CreateOidcProvider,UsePreviousValue=true
+
+      - name: Wait for operation to complete
+        run: |
+          echo "Polling StackSet operation..."
+          for i in $(seq 1 60); do
+            STATUS=$(aws cloudformation list-stack-set-operations \
+              --stack-set-name ${{ env.STACK_SET }} \
+              --query 'Summaries[0].Status' --output text)
+            echo "  attempt $i: $STATUS"
+            case "$STATUS" in
+              SUCCEEDED) echo "StackSet update SUCCEEDED."; exit 0 ;;
+              FAILED|STOPPED)
+                echo "::error::StackSet operation ended in $STATUS"
+                aws cloudformation list-stack-instances \
+                  --stack-set-name ${{ env.STACK_SET }} \
+                  --query 'Summaries[].{Account:Account,Status:Status,Reason:StatusReason}' \
+                  --output table
+                exit 1 ;;
+              *) sleep 10 ;;
+            esac
+          done
+          echo "::error::Timed out waiting for StackSet operation"
+          exit 1

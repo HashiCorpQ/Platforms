@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  HashiCorpQ platforms | governance module v1.0
+  HashiCorpQ platforms | governance module v1.1
   Per-customer FinOps budget (actual 80% + forecasted 100% alerts) and an
   AWS Config conformance pack of managed compliance rules. Requires the
   account to have a Config recorder (Control Tower enrolled accounts do).
@@ -35,7 +35,7 @@ Parameters:
   BudgetNotificationEmail:
     Description: Email for budget notifications (FinOps).
     Type: String
-    Default: aws.administrator+FinOps@angsignal.com
+    Default: aws.administrator+FinOps@webiq.cloud
     AllowedPattern: ^[^\s@]+@[^\s@]+\.[^\s@]+$
   DeployConformancePack:
     Description: >-
@@ -48,6 +48,8 @@ Parameters:
 
 Conditions:
   ShouldDeployConformancePack: !Equals [!Ref DeployConformancePack, 'true']
+  IsGovernmentProfile: !Equals [!Ref ComplianceProfile, 'government']
+  ShouldDeployGovPack: !And [!Condition ShouldDeployConformancePack, !Condition IsGovernmentProfile]
 
 Resources:
 
@@ -147,6 +149,65 @@ Resources:
                 Owner: AWS
                 SourceIdentifier: INCOMING_SSH_DISABLED
 
+  NistConformancePack:
+    Type: AWS::Config::ConformancePack
+    Condition: ShouldDeployGovPack
+    Properties:
+      ConformancePackName: !Sub '${NamePrefix}-nist-baseline'
+      TemplateBody: |
+        Resources:
+          IamPasswordPolicy:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: iam-password-policy-nist
+              Source:
+                Owner: AWS
+                SourceIdentifier: IAM_PASSWORD_POLICY
+          RootAccountMfa:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: root-account-mfa-enabled-nist
+              Source:
+                Owner: AWS
+                SourceIdentifier: ROOT_ACCOUNT_MFA_ENABLED
+          IamUserMfa:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: iam-user-mfa-enabled-nist
+              Source:
+                Owner: AWS
+                SourceIdentifier: IAM_USER_MFA_ENABLED
+          S3SslRequestsOnly:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: s3-ssl-requests-only-nist
+              Source:
+                Owner: AWS
+                SourceIdentifier: S3_BUCKET_SSL_REQUESTS_ONLY
+          CmkRotationEnabled:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: cmk-rotation-enabled-nist
+              Source:
+                Owner: AWS
+                SourceIdentifier: CMK_BACKING_KEY_ROTATION_ENABLED
+          LogGroupRetention:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: loggroup-retention-90d-nist
+              InputParameters:
+                MinRetentionTime: 90
+              Source:
+                Owner: AWS
+                SourceIdentifier: CW_LOGGROUP_RETENTION_PERIOD_CHECK
+          EbsSnapshotNotPublic:
+            Type: AWS::Config::ConfigRule
+            Properties:
+              ConfigRuleName: ebs-snapshot-not-public-nist
+              Source:
+                Owner: AWS
+                SourceIdentifier: EBS_SNAPSHOT_PUBLIC_RESTORABLE_CHECK
+
 Outputs:
   BudgetName:
     Value: !Sub '${NamePrefix}-monthly-budget'
@@ -155,3 +216,7 @@ Outputs:
     Condition: ShouldDeployConformancePack
     Value: !Sub '${NamePrefix}-baseline'
     Export: {Name: !Sub '${NamePrefix}-conformance-pack'}
+  NistConformancePackName:
+    Condition: ShouldDeployGovPack
+    Value: !Sub '${NamePrefix}-nist-baseline'
+    Export: {Name: !Sub '${NamePrefix}-nist-conformance-pack'}

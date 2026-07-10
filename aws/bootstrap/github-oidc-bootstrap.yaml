@@ -31,7 +31,7 @@ Parameters:
     Description: Short environment name used in the role name.
     Type: String
     Default: dev
-    AllowedValues: [dev, test, prod]
+    AllowedValues: [dev, test, acp, prod, sbx]
   CreateOidcProvider:
     Description: >-
       Create the GitHub OIDC provider in this account. Singleton - set true only
